@@ -10,6 +10,10 @@ public class Product
     public decimal Rating { get; set; }
     public int ReviewsCount { get; set; }
     public string Url { get; set; } = "";
+
+    // Заполняются в Scraper.Finalize после сортировки
+    public int Rank { get; set; }
+    public string Demand { get; set; } = "";
 }
 
 /// <summary>
@@ -121,11 +125,48 @@ public static class Scraper
             await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
         }
 
-        progress.Report($"Готово. Всего собрано товаров: {products.Count}");
+        progress.Report($"Готово. Всего собрано карточек: {products.Count}");
+        return products;
+    }
 
-        // Сортируем по количеству отзывов — косвенный, но рабочий индикатор
-        // объёма продаж, т.к. Kaspi не показывает точное число проданных штук.
-        return products.OrderByDescending(p => p.ReviewsCount).ToList();
+    /// <summary>
+    /// Убирает дубли (по ссылке), отсекает товары с числом отзывов меньше minReviews,
+    /// сортирует по отзывам и присваивает место в рейтинге и уровень спроса.
+    /// Kaspi не показывает точное число продаж, поэтому спрос — это оценка
+    /// по количеству отзывов относительно остальных товаров категории:
+    /// топ-10% — очень высокий, следующие 20% — высокий, следующие 30% — средний, остальные — низкий.
+    /// </summary>
+    public static List<Product> Finalize(List<Product> raw, int minReviews)
+    {
+        var sorted = raw
+            .GroupBy(p => p.Url)
+            .Select(g => g.First())
+            .Where(p => p.ReviewsCount >= minReviews)
+            .OrderByDescending(p => p.ReviewsCount)
+            .ThenByDescending(p => p.Rating)
+            .ToList();
+
+        int withReviews = sorted.Count(p => p.ReviewsCount > 0);
+
+        for (int i = 0; i < sorted.Count; i++)
+        {
+            var p = sorted[i];
+            p.Rank = i + 1;
+
+            if (p.ReviewsCount == 0)
+            {
+                p.Demand = "Нет отзывов";
+                continue;
+            }
+
+            double position = (double)i / withReviews;
+            p.Demand = position < 0.10 ? "Очень высокий"
+                     : position < 0.30 ? "Высокий"
+                     : position < 0.60 ? "Средний"
+                     : "Низкий";
+        }
+
+        return sorted;
     }
 
     private static int CleanNumber(string raw)
