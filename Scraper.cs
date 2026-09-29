@@ -1,5 +1,6 @@
 using Microsoft.Playwright;
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace KaspiParser;
 
@@ -14,6 +15,9 @@ public class Product
     // Заполняются в Scraper.Finalize после сортировки
     public int Rank { get; set; }
     public string Demand { get; set; } = "";
+
+    // Заполняется в Scraper.FetchSellerCountsAsync. null значит "не проверяли".
+    public int? SellerCount { get; set; }
 }
 
 /// <summary>
@@ -136,12 +140,19 @@ public static class Scraper
     /// по количеству отзывов относительно остальных товаров категории:
     /// топ-10% — очень высокий, следующие 20% — высокий, следующие 30% — средний, остальные — низкий.
     /// </summary>
-    public static List<Product> Finalize(List<Product> raw, int minReviews)
+    public static List<Product> Finalize(
+        List<Product> raw, int minReviews, IEnumerable<string>? excludedBrands = null)
     {
+        var brands = (excludedBrands ?? Enumerable.Empty<string>())
+            .Select(b => b.Trim())
+            .Where(b => b.Length > 0)
+            .ToList();
+
         var sorted = raw
             .GroupBy(p => p.Url)
             .Select(g => g.First())
             .Where(p => p.ReviewsCount >= minReviews)
+            .Where(p => !ContainsBrand(p.Title, brands))
             .OrderByDescending(p => p.ReviewsCount)
             .ThenByDescending(p => p.Rating)
             .ToList();
@@ -167,6 +178,74 @@ public static class Scraper
         }
 
         return sorted;
+    }
+
+    // Ищет бренд в названии как отдельное слово, без учёта регистра
+    // ("Apple" найдётся в "Чехол Apple iPhone", но не в "Pineapple").
+    // Селектор строк таблицы продавцов на странице товара:
+    // <table class="sellers-table__self"><tbody><tr>...</tr>...</tbody></table>
+    // Количество <tr> в tbody = количество продавцов этого товара.
+    private const string SelectorSellerRows = "table.sellers-table__self tbody tr";
+
+    /// <summary>
+    /// Заходит на страницы первых topN товаров (уже отсортированных по спросу)
+    /// и считает продавцов у каждого. Если продавец один — почти наверняка это
+    /// собственный бренд продавца, а не то, что можно перепродавать самому.
+    /// Ходим только по топу, а не по всей категории, чтобы не плодить лишние
+    /// запросы и не словить капчу.
+    /// </summary>
+    public static async Task FetchSellerCountsAsync(
+        List<Product> products, int topN, int delayMs, IProgress<string> progress,
+        CancellationToken cancellationToken = default)
+    {
+        var toCheck = products.Take(topN).ToList();
+        if (toCheck.Count == 0) return;
+
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        {
+            Headless = true
+        });
+        var context = await browser.NewContextAsync(new BrowserNewContextOptions
+        {
+            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            Locale = "ru-RU",
+            ViewportSize = new ViewportSize { Width = 1920, Height = 1080 }
+        });
+        var page = await context.NewPageAsync();
+
+        int i = 0;
+        foreach (var p in toCheck)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            i++;
+            progress.Report($"Продавцы {i}/{toCheck.Count}: {p.Title}");
+
+            try
+            {
+                await page.GotoAsync(p.Url, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+                await page.WaitForTimeoutAsync(delayMs);
+                var rows = await page.QuerySelectorAllAsync(SelectorSellerRows);
+                p.SellerCount = rows.Count;
+            }
+            catch (Exception ex)
+            {
+                progress.Report($"  Не удалось получить продавцов: {ex.Message}");
+                p.SellerCount = null;
+            }
+        }
+    }
+
+    private static bool ContainsBrand(string title, List<string> brands)
+    {
+        foreach (var brand in brands)
+        {
+            var pattern = $@"(?<!\w){Regex.Escape(brand)}(?!\w)";
+            if (Regex.IsMatch(title, pattern, RegexOptions.IgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     private static int CleanNumber(string raw)

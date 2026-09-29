@@ -9,7 +9,7 @@ public static class ExcelExporter
         using var wb = new XLWorkbook();
         var ws = wb.Worksheets.Add("Товары");
 
-        string[] headers = { "№", "Название", "Цена, ₸", "Рейтинг", "Отзывов", "Спрос", "Ссылка" };
+        string[] headers = { "№", "Название", "Цена, ₸", "Рейтинг", "Отзывов", "Спрос", "Продавцов", "Ссылка" };
         for (int i = 0; i < headers.Length; i++)
             ws.Cell(1, i + 1).Value = headers[i];
 
@@ -28,8 +28,9 @@ public static class ExcelExporter
             ws.Cell(row, 4).Value = p.Rating;
             ws.Cell(row, 5).Value = p.ReviewsCount;
             ws.Cell(row, 6).Value = p.Demand;
+            ws.Cell(row, 7).Value = p.SellerCount.HasValue ? p.SellerCount.Value.ToString() : "—";
 
-            var linkCell = ws.Cell(row, 7);
+            var linkCell = ws.Cell(row, 8);
             linkCell.Value = "Открыть";
             if (Uri.TryCreate(p.Url, UriKind.Absolute, out var uri))
                 linkCell.SetHyperlink(new XLHyperlink(uri));
@@ -65,6 +66,7 @@ public static class ExcelExporter
         ws.Column(5).Width = 12;
         ws.Column(6).Width = 18;
         ws.Column(7).Width = 12;
+        ws.Column(8).Width = 12;
 
         // Вторая вкладка — справка, чтобы через месяц было понятно, откуда данные
         var info = wb.Worksheets.Add("Инфо");
